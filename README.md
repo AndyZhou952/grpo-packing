@@ -1,9 +1,12 @@
 ## Optimization 1
-`grpo_models.py` function `batch_unsorted_segment_sum`
+`grpo_models.py` function `batch_unsorted_segment_sum` ~#261
 
 test script: `tests/test_batch_unsorted_segment_sum.py`
+
 For batch size = 128, sequence length = 8,192, segment number = 32,
-original implementation time ~126.76 ms  new ~ 6.85 ms.
+**original time ~126.76 ms  new ~ 6.85 ms**.
+
+GRPO training on the fly testing: **original time ~ 6ms, new ~ 2.5 ms**
 
 **original version:**
 
