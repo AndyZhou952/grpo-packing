@@ -6,7 +6,8 @@ test script: `tests/test_batch_unsorted_segment_sum.py`
 For batch size = 128, sequence length = 8,192, segment number = 32,
 **original time ~126.76 ms  new ~ 6.85 ms, speed-up x18.5**.
 
-GRPO training on the fly testing (ALL following default config in the branch 0.4.0): **original time ~ 6ms, new ~ 2.5 ms**
+GRPO training on the fly testing (ALL following default config in the branch 0.4.0): 
+**original time ~ 6ms, new ~ 2.5 ms, speed-up x2.4**
 
 **original version:**
 
@@ -45,6 +46,11 @@ def batch_unsorted_segment_sum_new(input_ids, segments_ids, num_segments):
 
 For unique prompts = 4, generations per prompt = 8, sequence length = 8,192,
 **original time ~3.87 ms  new ~ 0.89 ms, speed-up x4.35**.
+
+GRPO training on the fly testing (ALL following default config in the branch 0.4.0, except that we set **pack_num=3**): 
+**original time ~ 24.09ms, new ~ 19.41 ms, speed-up x1.24**
+
+Remark: the logger performs slightly different from the original version for efficiency, but essentially report the same information.
 
 **original version:**
 
