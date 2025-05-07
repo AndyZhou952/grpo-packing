@@ -345,46 +345,58 @@ class GRPOTrainer:
         prompt_completion_ids = []
         actual_sequence_length = []
         responses_mask = []
+        advantages = []
         sample_index = []
         sample_valid_length = []
-        advantages = []
+
         occupied_length = 0
         for i, data_dict in enumerate(pack_list):
             sample_prompt_completion_ids = data_dict["prompt_completion_ids"]
             sample_response_mask = data_dict["response_mask"]
-            sample_advantage = data_dict["advantage"]
+            sample_advantage_value = data_dict["advantage"]
             prompt_start_idx = data_dict["prompt_start_idx"]
             response_end_index = data_dict["response_end_index"]
-            sample_length = response_end_index - prompt_start_idx + 2
 
-            sample_prompt_completion_ids = sample_prompt_completion_ids[prompt_start_idx:response_end_index + 1]
+            segment = sample_prompt_completion_ids[prompt_start_idx:response_end_index + 1]
             sample_prompt_completion_ids = np.pad(
-                sample_prompt_completion_ids, (0, 1), mode="constant", constant_values=pad_token_id,
+                segment, (0, 1),
+                mode="constant", constant_values=pad_token_id
             )
 
-            sample_response_mask = sample_response_mask[prompt_start_idx:response_end_index + 1]
+            mask_segment = sample_response_mask[prompt_start_idx:response_end_index + 1]
             sample_response_mask = np.pad(
-                sample_response_mask, (0, 1), mode="constant", constant_values=0,
+                mask_segment, (0, 1),
+                mode="constant", constant_values=0
             )
 
+            sample_length = sample_prompt_completion_ids.shape[0]
+            this_sample_index = np.full(sample_length, i, dtype=int)
+            sample_advantage = np.full(
+                sample_length, sample_advantage_value,
+                dtype=np.asarray(sample_advantage_value).dtype
+            )
 
             sample_actual_sequence_length = occupied_length + sample_length
-            this_sample_index = np.array([i] * sample_length)
-            sample_advantage = np.array([sample_advantage] * sample_length)
 
             if i == real_sample_num - 1:
-                sample_prompt_completion_ids = pad_sequence_to_length(
-                    sample_prompt_completion_ids, pad_to_length - occupied_length, pad_token_id
-                )
-                sample_response_mask = pad_sequence_to_length(
-                    sample_response_mask, pad_to_length - occupied_length, 0
-                )
-                sample_advantage = pad_sequence_to_length(
-                    sample_advantage, pad_to_length - occupied_length, 0
-                )
-                this_sample_index = pad_sequence_to_length(
-                    this_sample_index, pad_to_length - occupied_length, i
-                )
+                pad_size = pad_to_length - occupied_length - sample_length
+                if pad_size > 0:
+                    sample_prompt_completion_ids = np.pad(
+                        sample_prompt_completion_ids, (0, pad_size),
+                        mode="constant", constant_values=pad_token_id
+                    )
+                    sample_response_mask = np.pad(
+                        sample_response_mask, (0, pad_size),
+                        mode="constant", constant_values=0
+                    )
+                    sample_advantage = np.pad(
+                        sample_advantage, (0, pad_size),
+                        mode="constant", constant_values=0
+                    )
+                    this_sample_index = np.pad(
+                        this_sample_index, (0, pad_size),
+                        mode="constant", constant_values=i
+                    )
                 sample_actual_sequence_length = pad_to_length
 
             prompt_completion_ids.append(sample_prompt_completion_ids)
@@ -392,28 +404,28 @@ class GRPOTrainer:
             advantages.append(sample_advantage)
             actual_sequence_length.append(sample_actual_sequence_length)
             sample_index.append(this_sample_index)
-            sample_valid_length.append(np.sum(sample_response_mask))
+            sample_valid_length.append(int(sample_response_mask.sum()))
 
             occupied_length += sample_length
 
-        for i in range(dummy_sample_num):
+        for j in range(dummy_sample_num):
+            sample_idx = real_sample_num + j
             prompt_completion_ids.append(np.array([pad_token_id]))
             responses_mask.append(np.array([0]))
             advantages.append(np.array([0]))
-            actual_sequence_length.append(actual_sequence_length[-1]+1)
-            sample_index.append(np.array([real_sample_num + i]))
+            new_actual_length = actual_sequence_length[-1] + 1
+            actual_sequence_length.append(new_actual_length)
+            sample_index.append(np.array([sample_idx]))
             sample_valid_length.append(1)
 
-        result = {
-            "prompt_completion_ids": np.concatenate(prompt_completion_ids, axis=0),
-            "responses_mask": np.concatenate(responses_mask, axis=0),
-            "advantages": np.concatenate(advantages, axis=0),
-            "actual_sequence_length": np.array(actual_sequence_length),
-            "sample_index": np.concatenate(sample_index, axis=0),
-            "sample_valid_length": np.array(sample_valid_length)
+        return {
+            "prompt_completion_ids": np.concatenate(prompt_completion_ids),
+            "responses_mask": np.concatenate(responses_mask),
+            "advantages": np.concatenate(advantages),
+            "actual_sequence_length": np.asarray(actual_sequence_length),
+            "sample_index": np.concatenate(sample_index),
+            "sample_valid_length": np.asarray(sample_valid_length),
         }
-
-        return result
 
     def pack_grpo_data(self, prompt_completion_ids, prompts_mask, responses_mask, advantages, pack_num=1):
         bs, seq_len = prompts_mask.shape

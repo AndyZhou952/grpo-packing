@@ -1,102 +1,40 @@
-## Optimization 1
-`grpo_models.py` function `batch_unsorted_segment_sum` ~#261
+import numpy as np
+import types
+import time
+import logging
+logger = logging.getLogger(__name__)
 
-test script: `tests/test_batch_unsorted_segment_sum.py`
+# helpers
+def pad_sequence_to_length(sequence, target_length, pad_value):
+    """Pad sequence to target length with specified pad value."""
+    current_length = len(sequence)
+    if current_length < target_length:
+        return np.pad(
+            sequence,
+            (0, target_length - current_length),
+            mode="constant",
+            constant_values=pad_value,
+        )
+    return sequence[:target_length]
 
-For batch size = 128, sequence length = 8,192, segment number = 32,
-**original time ~126.76 ms  new ~ 6.85 ms, speed-up x18.5**.
+def create_pack_group(self, data_dict_list, pack_num):
+    sample_num = len(data_dict_list)
+    pack_group, each_group = [], []
+    current_group_length = 0
+    for i in range(sample_num):
+        sample_length = data_dict_list[i]["response_end_index"] - data_dict_list[i]["prompt_start_idx"] + 2
+        needed_length = current_group_length + sample_length + (pack_num - len(each_group) - 1)
+        if len(each_group) >= pack_num or needed_length > self.grpo_config.seq_length:
+            pack_group.append(each_group)
+            each_group = []
+            current_group_length = 0
+        each_group.append(data_dict_list[i])
+        current_group_length += sample_length
+    if each_group:
+        pack_group.append(each_group)
+    return pack_group
 
-GRPO training on the fly testing (ALL following default config in the branch 0.4.0): 
-**original time ~ 6ms, new ~ 2.5 ms, speed-up x2.4**
-
-**original version:**
-
-```python
-def batch_unsorted_segment_sum(input_ids, segments_ids, num_segments):
-    slice = P.StridedSlice()
-    bs, seq_len = input_ids.shape
-    output = ops.zeros((bs, num_segments), input_ids.dtype)
-    for b in range(bs):
-        current_input = slice(input_ids, (b, 0), (b + 1, seq_len), (1, 1))
-        current_segments = slice(segments_ids, (b, 0), (b + 1, seq_len), (1, 1))
-        seg_sum = ops.unsorted_segment_sum(current_input, current_segments, num_segments)
-        output[b] = seg_sum
-    return output
-```
-
-**updated version:**
-
-```python
-# also remove self.slice definition
-def batch_unsorted_segment_sum_new(input_ids, segments_ids, num_segments):
-    bs, _ = input_ids.shape
-    offsets = ops.arange(0, bs * num_segments, num_segments)
-    # ensure segment_id uniqueness after reshape
-    seg_off = segments_ids + offsets.view(bs, 1)
-    flat_sum = ops.unsorted_segment_sum(
-        input_ids.view(-1),
-        seg_off.view(-1),
-        bs * num_segments
-    )
-    return flat_sum.view(bs, num_segments)
-```
-
-## Optimization 2
-
-`grpo_trainer.py` function `pack_grpo_data` ~#417 Vectorization
-
-test script: `tests/test_pack_grpo_data.py`
-
-For unique prompts = 4, generations per prompt = 8, sequence length = 8,192,
-**original time ~3.87 ms  new ~ 0.89 ms, speed-up x4.35**.
-
-GRPO training on the fly testing (ALL following default config in the branch 0.4.0, except that we set **pack_num=3**): 
-**original time ~ 24.09ms, new ~ 19.41 ms, speed-up x1.24**
-
-Remark: the logger performs slightly different from the original version for efficiency, but essentially report the same information.
-
-**original version:**
-
-```python
 def pack_grpo_data(self, prompt_completion_ids, prompts_mask, responses_mask, advantages, pack_num=1):
-
-    data_dict_list = []
-    bs = prompt_completion_ids.shape[0]
-    advantages = advantages.reshape(-1)
-    logger.info(f"advantages shape in pack: {advantages.shape}")
-    for i in range(bs):
-        sample_prompt_mask = prompts_mask[i]
-        sample_response_mask = responses_mask[i]
-        indices = np.nonzero(sample_prompt_mask)[0]
-        if len(indices) > 0:
-            prompt_start_idx = indices[0]
-        else:
-            logger.warning(f"prompts_mask is all zero for index {i}!")
-            continue
-        indices = np.nonzero(sample_response_mask)[0]
-        if len(indices) > 0:
-            response_end_index = indices[-1]
-        else:
-            logger.warning(f"responses_mask is all zero for index {i}!")
-            continue
-        data_dict = {"prompt_completion_ids": prompt_completion_ids[i],
-                     "prompt_mask": prompts_mask[i],
-                     "response_mask": responses_mask[i],
-                     "advantage": advantages[i],
-                     "prompt_start_idx": prompt_start_idx,
-                     "response_end_index": response_end_index}
-        data_dict_list.append(data_dict)
-    pack_group = self.create_pack_group(data_dict_list, pack_num)
-    for i, pack_list in enumerate(pack_group):
-        packed = self.pack_grouped_data(pack_list, pack_num)
-        result.append(packed)
-    return result
-```
-
-**updated version:**
-
-```python
-def pack_grpo_data_new(self, prompt_completion_ids, prompts_mask, responses_mask, advantages, pack_num=1):
     bs, seq_len = prompts_mask.shape
     advantages = advantages.reshape(-1)
     logger.info(f"advantages shape in pack: {advantages.shape}")
@@ -108,7 +46,7 @@ def pack_grpo_data_new(self, prompt_completion_ids, prompts_mask, responses_mask
     # warnings
     zero_prompts = np.where(~has_prompt)[0]
     zero_responses = np.where(has_prompt & ~has_response)[0]
-    if zero_prompts.size> 0:
+    if zero_prompts.size > 0:
         logger.warning(
             "prompts_mask is all zero for indices [%s]!",
             ", ".join(map(str, zero_prompts.tolist()))
@@ -142,24 +80,8 @@ def pack_grpo_data_new(self, prompt_completion_ids, prompts_mask, responses_mask
     pack_group = self.create_pack_group(data_dict_list, pack_num)
     result = [self.pack_grouped_data(p, pack_num) for p in pack_group]
     return result
-```
 
-## Optimization 3
-`grpo_models.py` function `pack_grouped_data`
-
-Changes: (1) pre-allocates array; (2) built-in np.pad; (3) get sample_length via shape
-
-test script: `tests/test_pack_grouped_data.py`
-
-For unique prompts = 4, generations per prompt = 8, sequence length = 8,192,
-**original time ~16.58 ms  new ~ 7.60 ms, speed-up x2.18**.
-
-GRPO training on the fly testing (ALL following default config in the branch 0.4.0, except that we set **pack_num=3**): 
-**original time ~ 18.86 ms, new ~ 16.52 ms, speed-up x1.14**
-
-**original version:**
-
-```python
+# functions to be tested old ver
 def pack_grouped_data(self, pack_list, pack_num=1):
     real_sample_num = len(pack_list)
     dummy_sample_num = pack_num - real_sample_num
@@ -238,11 +160,8 @@ def pack_grouped_data(self, pack_list, pack_num=1):
     }
 
     return result
-```
 
-**updated version:**
-
-```python
+# functions to be tested - new ver
 def pack_grouped_data_new(self, pack_list, pack_num=1):
     real_sample_num = len(pack_list)
     dummy_sample_num = pack_num - real_sample_num
@@ -333,4 +252,158 @@ def pack_grouped_data_new(self, pack_list, pack_num=1):
         "sample_index":           np.concatenate(sample_index),
         "sample_valid_length":    np.asarray(sample_valid_length),
     }
-```
+
+def generate_synthetic_batch(num_unique_prompts,
+                             num_generations_per_prompt,
+                             sequence_length,
+                             vocabulary_size=30000):
+    rng = np.random.default_rng(42)
+    batch_size = num_unique_prompts * num_generations_per_prompt
+
+    token_id_matrix = rng.integers(
+        low=1,
+        high=vocabulary_size,
+        size=(batch_size, sequence_length),
+        dtype=np.int32
+    )
+
+    prompt_mask_matrix = np.zeros((batch_size, sequence_length), dtype=np.int32)
+    response_mask_matrix = np.zeros((batch_size, sequence_length), dtype=np.int32)
+    advantage_values = rng.standard_normal(batch_size).astype(np.float32)
+
+    for sample_idx in range(batch_size):
+        max_prompt_length = sequence_length // 4
+        prompt_length = rng.integers(1, max_prompt_length + 1)
+
+        max_response_length = sequence_length - prompt_length - 1
+        response_length = rng.integers(
+            1,
+            min(max_response_length, sequence_length // 4) + 1
+        )
+
+        prompt_start_index = rng.integers(
+            0,
+            sequence_length - prompt_length - response_length
+        )
+
+        response_start_index = prompt_start_index + prompt_length
+
+        prompt_mask_matrix[
+            sample_idx,
+            prompt_start_index:response_start_index
+        ] = 1
+        response_mask_matrix[
+            sample_idx,
+            response_start_index:response_start_index + response_length
+        ] = 1
+
+    return token_id_matrix, prompt_mask_matrix, response_mask_matrix, advantage_values
+
+def test_equivalence(num_unique_prompts=4,
+                     num_generations_per_prompt=8,
+                     sequence_length=1024):
+    batch_ids, prompt_mask, response_mask, advantage_values = generate_synthetic_batch(
+        num_unique_prompts,
+        num_generations_per_prompt,
+        sequence_length
+    )
+
+    dummy_old = types.SimpleNamespace(
+        grpo_config=types.SimpleNamespace(seq_length=sequence_length),
+        tokenizer=types.SimpleNamespace(eos_token_id=5)
+    )
+    dummy_old.create_pack_group = types.MethodType(create_pack_group, dummy_old)
+    dummy_old.pack_grouped_data = types.MethodType(pack_grouped_data, dummy_old)
+
+    dummy_new = types.SimpleNamespace(
+        grpo_config=types.SimpleNamespace(seq_length=sequence_length),
+        tokenizer=types.SimpleNamespace(eos_token_id=5)
+    )
+    dummy_new.create_pack_group = types.MethodType(create_pack_group, dummy_new)
+    dummy_new.pack_grouped_data = types.MethodType(pack_grouped_data_new, dummy_new)
+
+    output_old = pack_grpo_data(
+        dummy_old,
+        batch_ids,
+        prompt_mask,
+        response_mask,
+        advantage_values,
+        pack_num=num_generations_per_prompt
+    )
+    output_new = pack_grpo_data(
+        dummy_new,
+        batch_ids,
+        prompt_mask,
+        response_mask,
+        advantage_values,
+        pack_num=num_generations_per_prompt
+    )
+
+    assert len(output_old) == len(output_new), "Number of groups differs"
+    for group_idx, (group_old, group_new) in enumerate(zip(output_old, output_new)):
+        for key in group_old:
+            assert np.array_equal(group_old[key], group_new[key]), (
+                f"Mismatch in group {group_idx}, key '{key}'"
+            )
+    print("all good!")
+
+def benchmark(num_unique_prompts=4,
+              num_generations_per_prompt=8,
+              sequence_length=8192):
+    batch_ids, prompt_mask, response_mask, advantage_values = generate_synthetic_batch(
+        num_unique_prompts,
+        num_generations_per_prompt,
+        sequence_length
+    )
+
+    dummy_old = types.SimpleNamespace(
+        grpo_config=types.SimpleNamespace(seq_length=sequence_length),
+        tokenizer=types.SimpleNamespace(eos_token_id=5)
+    )
+    dummy_old.create_pack_group = types.MethodType(create_pack_group, dummy_old)
+    dummy_old.pack_grouped_data = types.MethodType(pack_grouped_data, dummy_old)
+
+    dummy_new = types.SimpleNamespace(
+        grpo_config=types.SimpleNamespace(seq_length=sequence_length),
+        tokenizer=types.SimpleNamespace(eos_token_id=5)
+    )
+    dummy_new.create_pack_group = types.MethodType(create_pack_group, dummy_new)
+    dummy_new.pack_grouped_data = types.MethodType(pack_grouped_data_new, dummy_new)
+
+    start_time = time.time()
+    for _ in range(100):
+        _ = pack_grpo_data(
+            dummy_old,
+            batch_ids,
+            prompt_mask,
+            response_mask,
+            advantage_values,
+            pack_num=num_generations_per_prompt
+        )
+    elapsed_old = (time.time() - start_time) / 100
+
+    start_time = time.time()
+    for _ in range(100):
+        _ = pack_grpo_data(
+            dummy_new,
+            batch_ids,
+            prompt_mask,
+            response_mask,
+            advantage_values,
+            pack_num=num_generations_per_prompt
+        )
+    elapsed_new = (time.time() - start_time) / 100
+
+    speedup = elapsed_old / elapsed_new
+    print(
+        f"unique_prompts={num_unique_prompts}  "
+        f"generations_per_prompt={num_generations_per_prompt}  "
+        f"sequence_length={sequence_length}  "
+        f"old={elapsed_old*1e3:.2f}ms  "
+        f"new={elapsed_new*1e3:.2f}ms  "
+        f"speed-up x{speedup:.2f}"
+    )
+
+if __name__ == "__main__":
+    test_equivalence() # all good!
+    benchmark() # old ~ 16.47ms  new ~ 7.60ms (total time running pack_grpo_data)
