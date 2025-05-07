@@ -1,7 +1,6 @@
 import time
 import types
 import numpy as np
-import mindspore as ms
 import logging
 logger = logging.getLogger(__name__)
 
