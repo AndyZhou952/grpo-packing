@@ -53,7 +53,7 @@ def benchmark(bs, seq_len, num_segments):
     t_new = (time.time() - t0)/100
 
     print(f"bs={bs} seq={seq_len} segs={num_segments}  "
-          f"old={t_old * 1e3:.2f}ms  new={t_new * 1e3:.2f}ms")
+          f"old={t_old * 1e3:.2f}ms  new={t_new * 1e3:.2f}ms  speed-up x{t_old/t_new:.2f}")
 
 if __name__ == "__main__":
     test_equivalence(bs = 128, seq_len = 8192, num_segments = 32) # all good!
