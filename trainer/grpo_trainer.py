@@ -416,38 +416,50 @@ class GRPOTrainer:
         return result
 
     def pack_grpo_data(self, prompt_completion_ids, prompts_mask, responses_mask, advantages, pack_num=1):
-
-        data_dict_list = []
-        bs = prompt_completion_ids.shape[0]
+        bs, seq_len = prompts_mask.shape
         advantages = advantages.reshape(-1)
         logger.info(f"advantages shape in pack: {advantages.shape}")
-        for i in range(bs):
-            sample_prompt_mask = prompts_mask[i]
-            sample_response_mask = responses_mask[i]
-            indices = np.nonzero(sample_prompt_mask)[0]
-            if len(indices) > 0:
-                prompt_start_idx = indices[0]
-            else:
-                logger.warning(f"prompts_mask is all zero for index {i}!")
-                continue
-            indices = np.nonzero(sample_response_mask)[0]
-            if len(indices) > 0:
-                response_end_index = indices[-1]
-            else:
-                logger.warning(f"responses_mask is all zero for index {i}!")
-                continue
-            data_dict = {"prompt_completion_ids": prompt_completion_ids[i],
-                         "prompt_mask": prompts_mask[i],
-                         "response_mask": responses_mask[i],
-                         "advantage": advantages[i],
-                         "prompt_start_idx": prompt_start_idx,
-                         "response_end_index": response_end_index}
-            data_dict_list.append(data_dict)
+
+        # determine if prompts and responses are non-empty
+        has_prompt = prompts_mask.any(axis=1)
+        has_response = responses_mask.any(axis=1)
+
+        # warnings
+        zero_prompts = np.where(~has_prompt)[0]
+        zero_responses = np.where(has_prompt & ~has_response)[0]
+        if zero_prompts.size > 0:
+            logger.warning(
+                "prompts_mask is all zero for indices [%s]!",
+                ", ".join(map(str, zero_prompts.tolist()))
+            )
+        if zero_responses.size > 0:
+            logger.warning(
+                "responses_mask is all zero for indices [%s]!",
+                ", ".join(map(str, zero_responses.tolist()))
+            )
+
+        # identify prompt_start_idx and response_end_index
+        first_prompt = prompts_mask.argmax(axis=1)
+        last_from_end = np.flip(responses_mask, axis=1).argmax(axis=1)
+        last_response = seq_len - 1 - last_from_end
+
+        # keep only those with both prompt and response
+        valid_idx = np.where(has_prompt & has_response)[0]
+
+        data_dict_list = [
+            {
+                "prompt_completion_ids": prompt_completion_ids[i],
+                "prompt_mask": prompts_mask[i],
+                "response_mask": responses_mask[i],
+                "advantage": advantages[i],
+                "prompt_start_idx": int(first_prompt[i]),
+                "response_end_index": int(last_response[i]),
+            }
+            for i in valid_idx
+        ]
+
         pack_group = self.create_pack_group(data_dict_list, pack_num)
-        result = []
-        for i, pack_list in enumerate(pack_group):
-            packed = self.pack_grouped_data(pack_list, pack_num)
-            result.append(packed)
+        result = [self.pack_grouped_data(p, pack_num) for p in pack_group]
         return result
 
     def compute_advantages(self, rewards, eps=1e-4):

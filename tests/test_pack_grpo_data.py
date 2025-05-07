@@ -1,53 +1,13 @@
-## Optimization 1
-`grpo_models.py` function `batch_unsorted_segment_sum` ~#261
+import time
+import types
+import numpy as np
+import mindspore as ms
+import logging
+logger = logging.getLogger(__name__)
 
-test script: `tests/test_batch_unsorted_segment_sum.py`
 
-For batch size = 128, sequence length = 8,192, segment number = 32,
-**original time ~126.76 ms  new ~ 6.85 ms**.
-
-GRPO training on the fly testing (ALL following default config in the branch 0.4.0): **original time ~ 6ms, new ~ 2.5 ms**
-
-**original version:**
-
-```python
-def batch_unsorted_segment_sum(input_ids, segments_ids, num_segments):
-    slice = P.StridedSlice()
-    bs, seq_len = input_ids.shape
-    output = ops.zeros((bs, num_segments), input_ids.dtype)
-    for b in range(bs):
-        current_input = slice(input_ids, (b, 0), (b + 1, seq_len), (1, 1))
-        current_segments = slice(segments_ids, (b, 0), (b + 1, seq_len), (1, 1))
-        seg_sum = ops.unsorted_segment_sum(current_input, current_segments, num_segments)
-        output[b] = seg_sum
-    return output
-```
-
-**updated version:**
-
-```python
-# also remove self.slice definition
-def batch_unsorted_segment_sum_new(input_ids, segments_ids, num_segments):
-    bs, _ = input_ids.shape
-    offsets = ops.arange(0, bs * num_segments, num_segments)
-    # ensure segment_id uniqueness after reshape
-    seg_off = segments_ids + offsets.view(bs, 1)
-    flat_sum = ops.unsorted_segment_sum(
-        input_ids.view(-1),
-        seg_off.view(-1),
-        bs * num_segments
-    )
-    return flat_sum.view(bs, num_segments)
-```
-## Optimization 2
-
-`grpo_trainer.py` function `pack_grpo_data` ~#417 Vectorization
-
-**original version:**
-
-```python
 def pack_grpo_data(self, prompt_completion_ids, prompts_mask, responses_mask, advantages, pack_num=1):
-
+    """ pack_grpo_data """
     data_dict_list = []
     bs = prompt_completion_ids.shape[0]
     advantages = advantages.reshape(-1)
@@ -75,15 +35,9 @@ def pack_grpo_data(self, prompt_completion_ids, prompts_mask, responses_mask, ad
                      "response_end_index": response_end_index}
         data_dict_list.append(data_dict)
     pack_group = self.create_pack_group(data_dict_list, pack_num)
-    for i, pack_list in enumerate(pack_group):
-        packed = self.pack_grouped_data(pack_list, pack_num)
-        result.append(packed)
+    result = [self.pack_grouped_data(p, pack_num) for p in pack_group]
     return result
-```
 
-**updated version:**
-
-```python
 def pack_grpo_data_new(self, prompt_completion_ids, prompts_mask, responses_mask, advantages, pack_num=1):
     bs, seq_len = prompts_mask.shape
     advantages = advantages.reshape(-1)
@@ -130,4 +84,49 @@ def pack_grpo_data_new(self, prompt_completion_ids, prompts_mask, responses_mask
     pack_group = self.create_pack_group(data_dict_list, pack_num)
     result = [self.pack_grouped_data(p, pack_num) for p in pack_group]
     return result
-```
+
+def generate_fake_batch(unique_prompts, generations_per_prompt, seq_len):
+    rng = np.random.default_rng(0)
+    bs = unique_prompts * generations_per_prompt
+
+    prompt_completion_ids = rng.integers(5, 32000, (bs, seq_len), dtype=np.int32)
+    base_masks = rng.random((unique_prompts, seq_len)) > 0.2
+    prompts_mask = np.repeat(base_masks, generations_per_prompt, axis=0).astype(np.int32)
+
+    response_mask = (rng.random((bs, seq_len)) > 0.5).astype(np.int32)
+
+    advantages = rng.standard_normal((bs, seq_len)).astype(np.float32)
+    return (prompt_completion_ids, prompts_mask, response_mask, advantages)
+
+def test_equivalence():
+    ids, prompts, responses, advantages = generate_fake_batch(4, 8, 1024)
+    dummy_self = types.SimpleNamespace(create_pack_group=lambda x, y: [x],
+                                       pack_grouped_data=lambda x, y: x) # placeholder really
+    out_old = pack_grpo_data(dummy_self, ids, prompts, responses, advantages)
+    out_new = pack_grpo_data_new(dummy_self, ids, prompts, responses, advantages)
+    assert all(all(all(np.array_equal(d1[k], d2[k]) if isinstance(d1[k], np.ndarray) else d1[k] == d2[k] for k in d1) for d1, d2 in zip(g1, g2)) for g1, g2 in zip(out_old, out_new)), "mismatch"
+    print("all good!")
+
+def benchmark(unique_prompts  = 4, generations_per_prompt = 8, seq_len = 8192):
+    ids, prompts, responses, advantages = generate_fake_batch(unique_prompts, generations_per_prompt, seq_len)
+    dummy_old = types.SimpleNamespace(create_pack_group=lambda x, y: [x],
+                                       pack_grouped_data=lambda x, y: x)
+    dummy_new = types.SimpleNamespace(create_pack_group=lambda x, y: [x],
+                                       pack_grouped_data=lambda x, y: x)
+
+    t0 = time.time()
+    for _ in range(100):
+        _ = pack_grpo_data(dummy_old, ids, prompts, responses, advantages)
+    t_old = (time.time() - t0)/100
+
+    t0 = time.time()
+    for _ in range(100):
+        _ = pack_grpo_data_new(dummy_new, ids, prompts, responses, advantages)
+    t_new = (time.time() - t0)/100
+
+    print(f"unique prompts={unique_prompts} generations_per_prompt={generations_per_prompt} seq_len={seq_len}  "
+          f"old={t_old * 1e3:.2f}ms  new={t_new * 1e3:.2f}ms")
+
+if __name__ == "__main__":
+    test_equivalence()
+    benchmark()

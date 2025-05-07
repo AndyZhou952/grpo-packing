@@ -3,7 +3,6 @@ import numpy as np
 import mindspore as ms
 from mindspore import Tensor, ops
 from mindspore.ops import operations as P
-import pytest
 
 def batch_unsorted_segment_sum(input_ids, segments_ids, num_segments):
     slice = P.StridedSlice()
@@ -29,7 +28,7 @@ def batch_unsorted_segment_sum_new(input_ids, segments_ids, num_segments):
 
 def test_equivalence(bs, seq_len, num_segments):
     np.random.seed(0)
-    a = Tensor(np.random.randint(0, 10, (bs, seq_len)), ms.int32)
+    a = Tensor(np.random.randint(0, 10, (bs, seq_len)), ms.float32)
     b = Tensor(np.random.randint(0,num_segments,(bs,seq_len)), ms.int32)
 
     out1 = batch_unsorted_segment_sum(a, b, num_segments)
@@ -57,5 +56,5 @@ def benchmark(bs, seq_len, num_segments):
           f"old={t_old * 1e3:.2f}ms  new={t_new * 1e3:.2f}ms")
 
 if __name__ == "__main__":
-    test_equivalence(bs = 128, seq_len = 8192, num_segments = 32) # all good
+    test_equivalence(bs = 128, seq_len = 8192, num_segments = 32) # all good!
     benchmark(bs = 128, seq_len = 8192, num_segments = 32) # old ~ 126.76ms  new ~ 6.85ms
