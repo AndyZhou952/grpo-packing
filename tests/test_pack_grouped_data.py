@@ -388,4 +388,4 @@ def benchmark(num_unique_prompts=4,
 
 if __name__ == "__main__":
     test_equivalence() # all good!
-    benchmark() # old ~ 16.47ms  new ~ 7.60ms (total time running pack_grpo_data)
+    benchmark() # old ~ 16.62ms  new ~ 7.88ms (total time running pack_grpo_data)

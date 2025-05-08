@@ -147,16 +147,16 @@ def pack_grpo_data_new(self, prompt_completion_ids, prompts_mask, responses_mask
 `grpo_models.py` function `pack_grouped_data`
 
 Changes: 
-[x] pre-allocates array; 
-[x] vectorized dummy fill
+- [x] pre-allocated array; 
+- [x] vectorized dummy fills
 
 test script: `tests/test_pack_grouped_data.py`
 
 For unique prompts = 4, generations per prompt = 8, sequence length = 8,192,
-**original time ~16.58 ms  new ~ 7.60 ms, speed-up x2.18**.
+**original time ~16.62 ms  new ~ 7.88 ms, speed-up x2.11**.
 
 GRPO training on the fly testing (ALL following default config in the branch 0.4.0, except that we set **pack_num=3**): 
-**original time ~ 18.86 ms, new ~ 16.52 ms, speed-up x1.14**
+**original time ~ 21.24 ms, new ~ 17.57 ms, speed-up x1.21**
 
 **original version:**
 
