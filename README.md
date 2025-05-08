@@ -59,7 +59,6 @@ Remark: the logger performs slightly different from the original version for eff
 
 ```python
 def pack_grpo_data(self, prompt_completion_ids, prompts_mask, responses_mask, advantages, pack_num=1):
-
     data_dict_list = []
     bs = prompt_completion_ids.shape[0]
     advantages = advantages.reshape(-1)
@@ -147,7 +146,9 @@ def pack_grpo_data_new(self, prompt_completion_ids, prompts_mask, responses_mask
 ## Optimization 3
 `grpo_models.py` function `pack_grouped_data`
 
-Changes: (1) pre-allocates array; (2) built-in np.pad; (3) get sample_length via shape
+Changes: 
+[x] pre-allocates array; 
+[x] vectorized dummy fill
 
 test script: `tests/test_pack_grouped_data.py`
 
@@ -249,14 +250,19 @@ def pack_grouped_data_new(self, pack_list, pack_num=1):
     pad_to_length = self.grpo_config.seq_length - dummy_sample_num
     pad_token_id = self.tokenizer.eos_token_id
 
-    prompt_completion_ids = []
-    actual_sequence_length = []
-    responses_mask = []
-    advantages = []
-    sample_index = []
-    sample_valid_length = []
+    total_sequence_slots = self.grpo_config.seq_length
+    total_samples = real_sample_num + dummy_sample_num
+
+    # preallocate
+    prompt_completion_ids = np.full(total_sequence_slots, pad_token_id, dtype=int)
+    responses_mask = np.zeros(total_sequence_slots, dtype=int)
+    advantages = np.zeros(total_sequence_slots, dtype=float)
+    sample_index = np.zeros(total_sequence_slots, dtype=int)
+    actual_sequence_length = np.zeros(total_samples, dtype=int)
+    sample_valid_length = np.zeros(total_samples, dtype=int)
 
     occupied_length = 0
+
     for i, data_dict in enumerate(pack_list):
         sample_prompt_completion_ids = data_dict["prompt_completion_ids"]
         sample_response_mask = data_dict["response_mask"]
@@ -264,73 +270,51 @@ def pack_grouped_data_new(self, pack_list, pack_num=1):
         prompt_start_idx = data_dict["prompt_start_idx"]
         response_end_index = data_dict["response_end_index"]
 
+        original_length = response_end_index - prompt_start_idx + 2
+
         segment = sample_prompt_completion_ids[prompt_start_idx:response_end_index + 1]
-        sample_prompt_completion_ids = np.pad(
-            segment, (0, 1),
-            mode="constant", constant_values=pad_token_id
-        )
-
+        tmp_prompt_ids = pad_sequence_to_length(segment, original_length, pad_token_id)
         mask_segment = sample_response_mask[prompt_start_idx:response_end_index + 1]
-        sample_response_mask = np.pad(
-            mask_segment, (0, 1),
-            mode="constant", constant_values=0
-        )
+        tmp_responses_mask = pad_sequence_to_length(mask_segment, original_length, 0)
 
-        sample_length = sample_prompt_completion_ids.shape[0]
-        this_sample_index = np.full(sample_length, i, dtype=int)
-        sample_advantage = np.full(
-            sample_length, sample_advantage_value,
-            dtype=np.asarray(sample_advantage_value).dtype
-        )
-
-        sample_actual_sequence_length = occupied_length + sample_length
+        tmp_sample_index = np.full(original_length, i, dtype=int)
+        tmp_advantages = np.full(original_length, sample_advantage_value, dtype=float)
 
         if i == real_sample_num - 1:
-            pad_size = pad_to_length - occupied_length - sample_length
-            if pad_size > 0:
-                sample_prompt_completion_ids = np.pad(
-                    sample_prompt_completion_ids, (0, pad_size),
-                    mode="constant", constant_values=pad_token_id
-                )
-                sample_response_mask = np.pad(
-                    sample_response_mask, (0, pad_size),
-                    mode="constant", constant_values=0
-                )
-                sample_advantage = np.pad(
-                    sample_advantage, (0, pad_size),
-                    mode="constant", constant_values=0
-                )
-                this_sample_index = np.pad(
-                    this_sample_index, (0, pad_size),
-                    mode="constant", constant_values=i
-                )
-            sample_actual_sequence_length = pad_to_length
+            tmp_prompt_ids = pad_sequence_to_length(tmp_prompt_ids, pad_to_length - occupied_length, pad_token_id)
+            tmp_responses_mask = pad_sequence_to_length(tmp_responses_mask, pad_to_length - occupied_length, 0)
+            tmp_advantages = pad_sequence_to_length(tmp_advantages, pad_to_length - occupied_length, 0)
+            tmp_sample_index = pad_sequence_to_length(tmp_sample_index, pad_to_length - occupied_length, i)
+            write_length = pad_to_length - occupied_length
+            actual_sequence_length[i] = pad_to_length
+        else:
+            write_length = original_length
+            actual_sequence_length[i] = occupied_length + original_length
 
-        prompt_completion_ids.append(sample_prompt_completion_ids)
-        responses_mask.append(sample_response_mask)
-        advantages.append(sample_advantage)
-        actual_sequence_length.append(sample_actual_sequence_length)
-        sample_index.append(this_sample_index)
-        sample_valid_length.append(int(sample_response_mask.sum()))
+        prompt_completion_ids[occupied_length:occupied_length + write_length] = tmp_prompt_ids
+        responses_mask[occupied_length:occupied_length + write_length] = tmp_responses_mask
+        advantages[occupied_length:occupied_length + write_length] = tmp_advantages
+        sample_index[occupied_length:occupied_length + write_length] = tmp_sample_index
 
-        occupied_length += sample_length
+        sample_valid_length[i] = int(tmp_responses_mask.sum())
+        occupied_length += write_length
 
-    for j in range(dummy_sample_num):
-        sample_idx = real_sample_num + j
-        prompt_completion_ids.append(np.array([pad_token_id]))
-        responses_mask.append(np.array([0]))
-        advantages.append(np.array([0]))
-        new_actual_length = actual_sequence_length[-1] + 1
-        actual_sequence_length.append(new_actual_length)
-        sample_index.append(np.array([sample_idx]))
-        sample_valid_length.append(1)
+    # fill dummy, prompt completion ids already pad_token_id, responses_mask and advantages already zero
+    start = occupied_length
+    end = start + dummy_sample_num
+    sample_index[start:end] = np.arange(real_sample_num, real_sample_num + dummy_sample_num, dtype=int)
+    base_length = actual_sequence_length[real_sample_num - 1]
+    actual_sequence_length[real_sample_num:real_sample_num + dummy_sample_num] = \
+        base_length + np.arange(1, dummy_sample_num + 1, dtype=int)
+    sample_valid_length[real_sample_num:real_sample_num + dummy_sample_num] = 1
 
-    return {
-        "prompt_completion_ids":  np.concatenate(prompt_completion_ids),
-        "responses_mask":         np.concatenate(responses_mask),
-        "advantages":             np.concatenate(advantages),
-        "actual_sequence_length": np.asarray(actual_sequence_length),
-        "sample_index":           np.concatenate(sample_index),
-        "sample_valid_length":    np.asarray(sample_valid_length),
+    result = {
+        "prompt_completion_ids":  prompt_completion_ids,
+        "responses_mask":         responses_mask,
+        "advantages":             advantages,
+        "actual_sequence_length": actual_sequence_length,
+        "sample_index":           sample_index,
+        "sample_valid_length":    sample_valid_length,
     }
+    return result
 ```
