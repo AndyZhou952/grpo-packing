@@ -18,6 +18,7 @@ def batch_unsorted_segment_sum(input_ids, segments_ids, num_segments):
 def batch_unsorted_segment_sum_new(input_ids, segments_ids, num_segments):
     bs, _ = input_ids.shape
     offsets = ops.arange(0, bs * num_segments, num_segments)
+    # ensure segment_id uniqueness after reshape
     seg_off = segments_ids + offsets.view(bs, 1)
     flat_sum = ops.unsorted_segment_sum(
         input_ids.view(-1),
